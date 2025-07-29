@@ -42,58 +42,22 @@ rclcpp::node_interfaces::NodeBaseInterface::SharedPtr MTCTaskNode::getNodeBaseIn
 {  
   return node_->get_node_base_interface();  
 }  
-   
+
+
 MTCTaskNode::MTCTaskNode(const rclcpp::NodeOptions& options)  
   : node_{ std::make_shared<rclcpp::Node>("mtc_node", options) }  
 {  
-  RCLCPP_INFO(LOGGER, "等待机器人描述参数...");  
+  RCLCPP_INFO(LOGGER, "初始化MTC节点...");  
     
+  // 直接从节点参数获取robot_description  
   std::string robot_description_str;  
-  std::string robot_description_semantic_str;  
-    
-  // 1. 从 robot_state_publisher 获取 robot_description  
-  auto robot_state_client = std::make_shared<rclcpp::SyncParametersClient>(node_, "/robot_state_publisher");  
-  if (robot_state_client->wait_for_service(std::chrono::seconds(10))) {  
-    try {  
-      auto parameters = robot_state_client->get_parameters({"robot_description"});  
-      if (!parameters.empty() && !parameters[0].as_string().empty()) {  
-        robot_description_str = parameters[0].as_string();  
-        RCLCPP_INFO(LOGGER, "成功获取 robot_description 参数");  
-      }  
-    } catch (const std::exception& e) {  
-      RCLCPP_ERROR(LOGGER, "获取 robot_description 失败: %s", e.what());  
-      return;  
-    }  
-  }  
-    
-  // 2. 从 move_group 获取 robot_description_semantic  
-  auto move_group_client = std::make_shared<rclcpp::SyncParametersClient>(node_, "/move_group");  
-  if (move_group_client->wait_for_service(std::chrono::seconds(10))) {  
-    try {  
-      auto parameters = move_group_client->get_parameters({"robot_description_semantic"});  
-      if (!parameters.empty() && !parameters[0].as_string().empty()) {  
-        robot_description_semantic_str = parameters[0].as_string();  
-        RCLCPP_INFO(LOGGER, "成功获取 robot_description_semantic 参数");  
-      }  
-    } catch (const std::exception& e) {  
-      RCLCPP_ERROR(LOGGER, "获取 robot_description_semantic 失败: %s", e.what());  
-      return;  
-    }  
-  }  
-    
-  // 3. 检查参数完整性  
-  if (robot_description_str.empty() || robot_description_semantic_str.empty()) {  
-    RCLCPP_ERROR(LOGGER, "无法获取完整的机器人描述参数");  
+  if (!node_->get_parameter("robot_description", robot_description_str)) {  
+    RCLCPP_ERROR(LOGGER, "无法获取robot_description参数");  
     return;  
   }  
     
-  // 4. 在当前节点上声明并设置参数  
-  node_->declare_parameter("robot_description", robot_description_str);  
-  node_->declare_parameter("robot_description_semantic", robot_description_semantic_str);  
+  RCLCPP_INFO(LOGGER, "成功获取robot_description参数，长度: %zu", robot_description_str.length());  
     
-  RCLCPP_INFO(LOGGER, "所有机器人描述参数成功设置！开始初始化 MTC 任务...");  
-    
-  // 5. 现在继续进行 MTC 任务初始化  
   setupPlanningScene();  
   doTask();  
 }
@@ -120,31 +84,48 @@ void MTCTaskNode::setupPlanningScene()
    
 void MTCTaskNode::doTask()  
 {  
-  task_ = createTask();  
+  RCLCPP_INFO(LOGGER, "开始创建MTC任务...");  
+  task_ = createTask();    
+    
+  // 显式启用任务内省和可视化  
+  // task_.enableIntrospection(true);  
+    
+  try    
+  {    
+    RCLCPP_INFO(LOGGER, "开始初始化任务...");  
+    task_.init();    
+    RCLCPP_INFO(LOGGER, "任务初始化成功");  
+  }    
+  catch (mtc::InitStageException& e)    
+  {    
+    RCLCPP_ERROR_STREAM(LOGGER, "任务初始化失败: " << e);    
+    return;    
+  }    
+     
+  RCLCPP_INFO(LOGGER, "开始任务规划，最大解决方案数: 5");  
+  if (!task_.plan(5))    
+  {    
+    RCLCPP_ERROR_STREAM(LOGGER, "Task planning failed");    
+    return;    
+  }    
+    
+  RCLCPP_INFO(LOGGER, "任务规划成功! 找到 %zu 个解决方案", task_.solutions().size());  
+    
+  // 确保发布任务描述和解决方案  
+  task_.introspection().publishTaskDescription();  
+  task_.introspection().publishSolution(*task_.solutions().front());    
+    
+  RCLCPP_INFO(LOGGER, "解决方案已发布到RViz进行可视化");  
+    
+  // 添加延迟以确保数据被发布  
+  rclcpp::sleep_for(std::chrono::seconds(2));  
    
-  try  
-  {  
-    task_.init();  
-  }  
-  catch (mtc::InitStageException& e)  
-  {  
-    RCLCPP_ERROR_STREAM(LOGGER, e);  
-    return;  
-  }  
-   
-  if (!task_.plan(5))  
-  {  
-    RCLCPP_ERROR_STREAM(LOGGER, "Task planning failed");  
-    return;  
-  }  
-  task_.introspection().publishSolution(*task_.solutions().front());  
-   
-  auto result = task_.execute(*task_.solutions().front());  
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS)  
-  {  
-    RCLCPP_ERROR_STREAM(LOGGER, "Task execution failed");  
-    return;  
-  }  
+  // auto result = task_.execute(*task_.solutions().front());  
+  // if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS)  
+  // {  
+  //   RCLCPP_ERROR_STREAM(LOGGER, "Task execution failed");  
+  //   return;  
+  // }  
    
   return;  
 }  
@@ -153,8 +134,14 @@ mtc::Task MTCTaskNode::createTask()
 {  
   mtc::Task task;  
   // 设置任务名称和加载机器人模型  
+  // 在任何其他操作之前启用内省  
+  task.enableIntrospection(true);  
+    
+  task.stages()->setName("demo task");    
+  task.loadRobotModel(node_);    
   task.stages()->setName("demo task");  
   task.loadRobotModel(node_);  
+  
    
   // 使用 FR3 配置  
   const auto& arm_group_name = "fr3_arm";  
@@ -396,27 +383,23 @@ mtc::Task MTCTaskNode::createTask()
 int main(int argc, char** argv)  
 {  
   rclcpp::init(argc, argv);  
-   
+     
   rclcpp::NodeOptions options;  
   options.automatically_declare_parameters_from_overrides(true);  
-   
-  // 创建MTCTaskNode对象和多线程执行器  
+     
   auto mtc_task_node = std::make_shared<MTCTaskNode>(options);  
   rclcpp::executors::MultiThreadedExecutor executor;  
-   
+     
   auto spin_thread = std::make_unique<std::thread>([&executor, &mtc_task_node]() {  
     executor.add_node(mtc_task_node->getNodeBaseInterface());  
     executor.spin();  
     executor.remove_node(mtc_task_node->getNodeBaseInterface());  
   });  
-   
-  mtc_task_node->setupPlanningScene();  
-  while(true){  
-    mtc_task_node->doTask();  
-    usleep(1000000);  
-  }  
-  // mtc_task_node->doTask();  
-   
+     
+  // 移除这些重复调用  
+  // mtc_task_node->setupPlanningScene();  // 已在构造函数中调用  
+  // while(true){ mtc_task_node->doTask(); usleep(1000000); }  // 移除无限循环  
+     
   spin_thread->join();  
   rclcpp::shutdown();  
   return 0;  
