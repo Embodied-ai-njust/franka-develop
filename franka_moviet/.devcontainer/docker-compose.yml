@@ -1,0 +1,30 @@
+version: '3'
+services:
+  franka_develop_service:
+    # build:
+    #   context: ..
+    #   dockerfile: .devcontainer/Dockerfile
+    image: nagisa1201/frankahub:franka
+    container_name: franka_develop_container
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - OMP_WAIT_POLICY=passive
+      - TERM=xterm-256color
+    volumes:
+      # - ${XAUTHORITY}:/root/.Xauthority
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ./../..:/home/Nagisa/franka-develop
+      - /dev:/dev
+      # - ../map:/home/Elaina/packages/catkin_ws/src/FAST_LIO/PCD
+    network_mode: host
+    pid: "host" # 添加 pid 命名空间共享
+    ipc: "host" # 添加 ipc 命名空间共享    
+    privileged: true
+    stdin_open: true
+    tty: true
+    user: "Nagisa"
+    # runtime: nvidia
+    working_dir: "/home/Nagisa" # 指定默认工作目录
+    entrypoint: [ "/bin/bash" ]
